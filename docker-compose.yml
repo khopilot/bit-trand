@@ -1,0 +1,63 @@
+# BTC Elite Trader - Docker Compose
+version: '3.8'
+
+services:
+  # Main trading bot
+  btc-trader:
+    build: .
+    container_name: btc-elite-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TRADING_MODE=paper  # paper, testnet, live
+    volumes:
+      - ./logs:/app/logs
+      - ./validation_reports:/app/validation_reports
+      - ./config:/app/config
+    depends_on:
+      - postgres
+    networks:
+      - btc-network
+    # For paper trading (default)
+    command: python scripts/run_paper.py
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    container_name: btc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: btc_trader
+      POSTGRES_USER: btc_trader
+      POSTGRES_PASSWORD: ${BTC_DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    networks:
+      - btc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btc_trader"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: btc-redis
+    restart: unless-stopped
+    networks:
+      - btc-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+networks:
+  btc-network:
+    driver: bridge

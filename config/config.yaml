@@ -1,0 +1,230 @@
+# BTC Elite Trader Configuration - PRODUCTION EXPERT EDITION
+#
+# Expert-level settings for production trading.
+# DO NOT use without first validating with: python scripts/run_validation.py
+#
+# Author: khopilot
+
+# =============================================================================
+# STRATEGY PARAMETERS
+# =============================================================================
+strategy:
+  # EMA Crossover Settings
+  ema_fast: 12
+  ema_slow: 26
+
+  # RSI Settings
+  rsi_period: 14
+  rsi_momentum_low: 50         # Entry zone: RSI between 50-70 for trend
+  rsi_momentum_high: 70
+  rsi_oversold: 35             # Contrarian entry below this
+  rsi_overbought: 75           # Blow-off top above this
+
+  # Bollinger Bands Settings
+  bb_period: 20
+  bb_std: 2
+
+  # ATR-Based Trailing Stop (EXPERT)
+  trailing_stop_atr_multiplier: 3.0   # 3x ATR trailing stop
+  min_stop_pct: 0.08                   # 8% minimum stop (crypto volatility)
+
+  # Slippage & Position Sizing
+  slippage: 0.001                      # 0.1% slippage assumption
+  max_position_pct: 0.25               # Max 25% of capital per trade
+  risk_per_trade_pct: 0.01             # Risk 1% of capital per trade
+
+# =============================================================================
+# FEAR & GREED INDEX (SIZE ADJUSTMENT, NOT ENTRY/EXIT)
+# =============================================================================
+fng:
+  greed_threshold: 80          # Reduce size when FNG > 80
+  fear_threshold: 25           # Increase size when FNG < 25
+  default_value: 50            # Fallback if API fails
+
+  # Size adjustments based on FNG (EXPERT)
+  extreme_fear_mult: 1.2       # 20% larger in extreme fear
+  fear_mult: 1.1               # 10% larger in fear
+  extreme_greed_mult: 0.7      # 30% smaller in extreme greed
+  greed_mult: 0.85             # 15% smaller in greed
+
+# =============================================================================
+# REGIME DETECTION (EXPERT)
+# =============================================================================
+regime:
+  # ADX (Trend Strength)
+  adx_period: 14
+  adx_strong_threshold: 25.0   # ADX > 25 = strong trend
+  adx_weak_threshold: 20.0     # ADX < 20 = no trend (ranging)
+
+  # Choppiness Index
+  chop_period: 14
+  chop_threshold: 61.8         # Above this = choppy/ranging market
+
+  # Market Structure
+  swing_lookback: 10           # Bars for swing high/low detection
+
+  # ATR Percentile
+  atr_lookback: 100            # Days for ATR percentile calculation
+
+# =============================================================================
+# POSITION SIZING (EXPERT - FRACTIONAL KELLY)
+# =============================================================================
+position_sizing:
+  kelly_fraction: 0.25         # Quarter Kelly (25% of optimal)
+  min_confidence: 0.6          # Minimum signal confidence to trade
+
+  # Multi-timeframe confirmation
+  use_mtf_filter: true         # Require daily trend alignment
+  use_regime_filter: true      # Only trade favorable regimes
+
+# =============================================================================
+# RISK MANAGEMENT (EXPERT)
+# =============================================================================
+risk:
+  # Position Limits
+  max_position_usd: 10000      # Max $10,000 per position
+
+  # Loss Limits
+  max_daily_loss_pct: 0.05     # 5% daily loss limit (hard stop)
+  max_drawdown_pct: 0.15       # 15% max drawdown before reducing size
+
+  # Trade Limits
+  max_trades_per_day: 10       # Prevent overtrading
+
+  # Drawdown Scaling (EXPERT)
+  drawdown_scale_start: 0.05   # Start scaling at 5% drawdown
+  drawdown_scale_max: 0.15     # Full reduction at 15% drawdown
+  drawdown_min_multiplier: 0.25 # Minimum position at 25% normal
+
+  # Consecutive Loss Protection (EXPERT)
+  consecutive_loss_limit: 3    # Enter recovery mode after 3 losses
+  recovery_multiplier: 0.5     # 50% position size in recovery
+  recovery_threshold: 0.5      # Exit recovery after 50% win rate
+
+  # Heat Tracking (EXPERT)
+  max_heat_score: 3.0          # Maximum risk exposure score
+  heat_decay_rate: 0.2         # How fast heat decays
+
+# =============================================================================
+# WALK-FORWARD VALIDATION (EXPERT)
+# =============================================================================
+validation:
+  train_ratio: 0.7             # 70% train, 30% test
+  min_train_days: 180          # Minimum 6 months training
+  min_test_days: 30            # Minimum 1 month testing
+  num_periods: 5               # 5 walk-forward periods
+  monte_carlo_runs: 1000       # Monte Carlo simulations
+
+  # Acceptance Criteria
+  min_consistency_ratio: 0.6   # 60% of periods must be profitable
+  max_degradation: 50          # Max 50% OOS degradation
+  min_oos_sharpe: 0.5          # Minimum out-of-sample Sharpe
+  max_p_value: 0.05            # Statistical significance threshold
+
+# =============================================================================
+# PERFORMANCE TRACKING (EXPERT)
+# =============================================================================
+performance:
+  rolling_window: 20           # Rolling 20-trade window for metrics
+  slippage_alert_pct: 0.005    # Alert if slippage > 0.5%
+  decay_threshold: 0.35        # Alert if win rate drops to 35%
+
+# =============================================================================
+# API SETTINGS
+# =============================================================================
+api:
+  # Timeouts (seconds)
+  coingecko_timeout: 15
+  binance_timeout: 15
+  fng_timeout: 10
+  telegram_timeout: 10
+
+  # Retry settings
+  max_retries: 3
+  retry_delay: 2               # Seconds between retries
+
+# =============================================================================
+# MARKET SETTINGS
+# =============================================================================
+market:
+  usd_khr_rate: 4050           # USD/KHR exchange rate
+  backtest_days: 365           # Days of history for backtesting
+  warmup_days: 30              # Days to warm up indicators
+  initial_capital: 10000       # Starting capital in USD
+
+# =============================================================================
+# EXCHANGE SETTINGS (BINANCE)
+# =============================================================================
+exchange:
+  name: binance
+  testnet: false               # Set to true for testnet
+  symbol: BTC/USDT
+  timeframe: 1h                # Hourly candles
+
+  # Order settings
+  order_type: market           # Market orders for reliability
+  min_order_size: 0.0001       # Minimum BTC order
+  price_precision: 2           # Price decimal places
+  quantity_precision: 5        # Quantity decimal places
+
+# =============================================================================
+# DATABASE SETTINGS
+# =============================================================================
+database:
+  # PostgreSQL (production)
+  use_postgres: true
+  host: localhost
+  port: 5432
+  name: btc_trader
+  user: btc_trader
+  # password: Set via BTC_DB_PASSWORD environment variable
+
+  # Fallback to in-memory if PostgreSQL unavailable
+  fallback_to_memory: true
+
+# =============================================================================
+# TELEGRAM SETTINGS
+# =============================================================================
+telegram:
+  enabled: true
+  # token: Set via TELEGRAM_BOT_TOKEN environment variable
+  # chat_id: Set via TELEGRAM_CHAT_ID environment variable
+
+  # Notification settings
+  notify_on_signal: true
+  notify_on_trade: true
+  notify_on_error: true
+  notify_on_daily_summary: true
+
+# =============================================================================
+# LOGGING SETTINGS
+# =============================================================================
+logging:
+  level: INFO                  # DEBUG for development
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+
+  # File logging
+  log_to_file: true
+  log_file: logs/btc_trader.log
+  max_file_size_mb: 10
+  backup_count: 5
+
+# =============================================================================
+# SAFETY CHECKLIST (MUST COMPLETE BEFORE LIVE)
+# =============================================================================
+# Before enabling live trading, ensure:
+#
+# [_] Run validation: python scripts/run_validation.py
+# [_] Paper trade for 30+ days
+# [_] Testnet trade for 7+ days
+# [_] API keys: withdrawal DISABLED
+# [_] IP whitelist configured on exchange
+# [_] 2FA enabled on exchange account
+# [_] Telegram alerts tested
+# [_] Database backups configured
+# [_] Kill switch tested
+# [_] Daily loss limit verified
+#
+# Only proceed when ALL checks are complete.
+# =============================================================================

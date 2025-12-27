@@ -1,0 +1,48 @@
+# BTC Trading Bot Configuration
+# Production-grade settings for Cambodia market targeting
+
+strategy:
+  # EMA Crossover Settings
+  ema_fast: 12
+  ema_slow: 26
+
+  # RSI Settings
+  rsi_period: 14
+  rsi_momentum_low: 50      # Lower bound for momentum entry
+  rsi_momentum_high: 70     # Upper bound for momentum entry
+  rsi_oversold: 35          # Oversold threshold for contrarian entry
+  rsi_overbought: 75        # Overbought threshold for exit signal
+
+  # Bollinger Bands Settings
+  bb_period: 20
+  bb_std: 2
+
+  # Risk Management
+  trailing_stop_atr_multiplier: 3.0   # Dynamic stop = entry - (ATR * multiplier) - increased for close-to-close ATR
+  min_stop_pct: 0.08                  # Minimum 8% stop distance (wider for crypto volatility)
+  slippage: 0.001                     # 0.1% slippage assumption
+  max_position_pct: 0.25              # Max 25% of capital per trade
+  risk_per_trade_pct: 0.01            # Risk 1% of capital per trade (conservative)
+
+fng:
+  greed_threshold: 80       # Extreme greed - avoid buying, consider selling
+  fear_threshold: 25        # Extreme fear - contrarian buy opportunity
+  default_value: 50         # Neutral fallback when API fails
+
+api:
+  coingecko_timeout: 15     # Timeout in seconds
+  binance_timeout: 15       # Timeout in seconds
+  fng_timeout: 10           # Timeout in seconds
+  telegram_timeout: 10      # Timeout in seconds
+  max_retries: 3            # Retry attempts for failed requests
+
+market:
+  usd_khr_rate: 4050        # USD to KHR exchange rate
+  backtest_days: 365        # Days of historical data for backtest
+  warmup_days: 30           # Days required for indicator warmup
+  initial_capital: 10000    # Starting capital in USD
+
+logging:
+  level: INFO               # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"

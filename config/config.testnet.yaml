@@ -1,0 +1,54 @@
+# BTC Trading Bot Configuration - TESTNET
+# Safe settings for testnet/paper trading
+
+strategy:
+  # EMA Crossover Settings
+  ema_fast: 12
+  ema_slow: 26
+
+  # RSI Settings
+  rsi_period: 14
+  rsi_momentum_low: 50
+  rsi_momentum_high: 70
+  rsi_oversold: 35
+  rsi_overbought: 75
+
+  # Bollinger Bands Settings
+  bb_period: 20
+  bb_std: 2
+
+  # Risk Management - CONSERVATIVE for testing
+  trailing_stop_atr_multiplier: 3.0
+  min_stop_pct: 0.08              # 8% minimum stop
+  slippage: 0.001                 # 0.1% slippage
+  max_position_pct: 0.10          # Max 10% per trade (conservative)
+  risk_per_trade_pct: 0.005       # Risk 0.5% per trade (very conservative)
+
+fng:
+  greed_threshold: 80
+  fear_threshold: 25
+  default_value: 50
+
+api:
+  coingecko_timeout: 15
+  binance_timeout: 15
+  fng_timeout: 10
+  telegram_timeout: 10
+  max_retries: 3
+
+market:
+  usd_khr_rate: 4050
+  backtest_days: 365
+  warmup_days: 30
+  initial_capital: 1000           # Smaller capital for testing
+
+risk:
+  max_position_usd: 500           # Max $500 per trade
+  max_daily_loss_pct: 0.03        # 3% daily loss limit
+  max_drawdown_pct: 0.10          # 10% max drawdown
+  max_trades_per_day: 5           # Limited trades
+
+logging:
+  level: DEBUG                    # More verbose for testing
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
