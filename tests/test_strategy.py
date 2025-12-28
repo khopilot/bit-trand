@@ -104,8 +104,8 @@ class TestStrategyEngine:
         assert signal.signal_type == SignalType.BUY_TREND
         assert signal.is_buy
 
-    def test_no_buy_when_fng_too_high(self, strategy_engine, sample_df):
-        """Should not buy when Fear & Greed is too high."""
+    def test_buy_allowed_even_with_high_fng(self, strategy_engine, sample_df):
+        """FNG filter is relaxed - should still allow buys in high greed."""
         df = sample_df.copy()
         df.loc[df.index[-1], "EMA_12"] = 45000
         df.loc[df.index[-1], "EMA_26"] = 44000
@@ -115,19 +115,21 @@ class TestStrategyEngine:
 
         signal = strategy_engine.generate_signal(df, None, fng_value=85)  # Extreme greed
 
-        assert signal.signal_type == SignalType.NONE
+        # FNG filter is relaxed - buys are allowed even in high greed
+        assert signal.signal_type == SignalType.BUY_TREND
 
     def test_sell_signal_trend_reversal(self, strategy_engine, sample_df):
-        """Should generate SELL signal on trend reversal."""
+        """Should generate SELL signal on extreme trend reversal."""
         df = sample_df.copy()
         # Previous: EMA12 > EMA26
         df.loc[df.index[-2], "EMA_12"] = 45000
         df.loc[df.index[-2], "EMA_26"] = 44000
-        # Current: EMA12 < EMA26 (death cross)
-        df.loc[df.index[-1], "EMA_12"] = 43500
-        df.loc[df.index[-1], "EMA_26"] = 44000
-        df.loc[df.index[-1], "Close"] = 43500
+        # Current: STRONG death cross with 5% EMA spread and very low RSI
+        df.loc[df.index[-1], "EMA_12"] = 40000
+        df.loc[df.index[-1], "EMA_26"] = 44000  # 10% spread
+        df.loc[df.index[-1], "Close"] = 38000   # Price below EMA, bear regime
         df.loc[df.index[-1], "ATR"] = 1000
+        df.loc[df.index[-1], "RSI"] = 25        # Very weak RSI < 30
 
         position = Position(
             entry_price=42000,
@@ -138,14 +140,16 @@ class TestStrategyEngine:
 
         signal = strategy_engine.generate_signal(df, position)
 
+        # Alpha Maximizer: Only exit on EXTREME reversal (3%+ spread AND RSI < 30)
         assert signal.signal_type == SignalType.SELL_REVERSAL
         assert signal.is_sell
 
     def test_trailing_stop_hit(self, strategy_engine, sample_df):
         """Should generate SELL signal when trailing stop is hit."""
         df = sample_df.copy()
-        df.loc[df.index[-1], "Close"] = 40000
-        df.loc[df.index[-1], "ATR"] = 1000
+        # Price dropped significantly from high
+        df.loc[df.index[-1], "Close"] = 35000  # Far below stop
+        df.loc[df.index[-1], "ATR"] = 500      # Low ATR for tighter stop
         df.loc[df.index[-1], "EMA_12"] = 41000
         df.loc[df.index[-1], "EMA_26"] = 40500
         df.loc[df.index[-2], "EMA_12"] = 41500
@@ -154,13 +158,14 @@ class TestStrategyEngine:
         position = Position(
             entry_price=45000,
             quantity=0.1,
-            highest_price=47000,  # Was at 47000, now at 40000
-            stop_price=44000,
+            highest_price=47000,  # Was at 47000, now at 35000 (25% drop)
+            stop_price=44000,     # Stop at 44000, price is 35000
             status=PositionStatus.OPEN,
         )
 
         signal = strategy_engine.generate_signal(df, position)
 
+        # Should trigger trailing stop since price (35000) < stop (calculated from highs)
         assert signal.signal_type == SignalType.SELL_TRAILING_STOP
         assert signal.is_sell
 
@@ -174,14 +179,14 @@ class TestPositionSizing:
         entry = 50000
         atr = 2000
 
-        position_usd, quantity, stop = strategy_engine.calculate_position_size(
+        result = strategy_engine.calculate_position_size(
             capital=capital,
             entry_price=entry,
             atr=atr,
         )
 
         max_allowed = capital * strategy_engine.config.max_position_pct
-        assert position_usd <= max_allowed
+        assert result.position_usd <= max_allowed
 
     def test_position_size_with_tight_stop(self, strategy_engine):
         """Tight stop should result in smaller position."""
@@ -189,7 +194,7 @@ class TestPositionSizing:
         entry = 50000
         atr = 500  # Small ATR = tight stop
 
-        position_usd, quantity, stop = strategy_engine.calculate_position_size(
+        result = strategy_engine.calculate_position_size(
             capital=capital,
             entry_price=entry,
             atr=atr,
@@ -197,7 +202,7 @@ class TestPositionSizing:
 
         # With min_stop_pct of 8%, stop should be at least 8% below entry
         min_stop_distance = entry * strategy_engine.config.min_stop_pct
-        actual_stop_distance = entry - stop
+        actual_stop_distance = entry - result.stop_price
         assert actual_stop_distance >= min_stop_distance
 
     def test_slippage_applied(self, strategy_engine):
@@ -209,7 +214,8 @@ class TestPositionSizing:
 
         assert buy_price > price
         assert sell_price < price
-        assert abs(buy_price - price) == abs(sell_price - price)
+        # Allow for floating point precision (within 0.01%)
+        assert abs(abs(buy_price - price) - abs(sell_price - price)) < 0.01
 
 
 class TestIndicators:

@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**VPS Setup Documentation**: See [CLAUDE-VPS-SETUP.md](./CLAUDE-VPS-SETUP.md) for detailed VPS deployment instructions and important discoveries about the OLD vs NEW trading systems.
+
 ## Project Overview
 
 Bitcoin trading simulation bot with Telegram notifications, targeting the Cambodian market (USD/KHR conversion at 4050 rate). Implements technical analysis strategies using real market data from CoinGecko and Fear & Greed Index.

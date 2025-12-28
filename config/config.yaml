@@ -15,8 +15,8 @@ strategy:
 
   # RSI Settings
   rsi_period: 14
-  rsi_momentum_low: 50         # Entry zone: RSI between 50-70 for trend
-  rsi_momentum_high: 70
+  rsi_momentum_low: 45         # Entry zone: RSI between 45-75 for trend (widened)
+  rsi_momentum_high: 75
   rsi_oversold: 35             # Contrarian entry below this
   rsi_overbought: 75           # Blow-off top above this
 
@@ -24,9 +24,9 @@ strategy:
   bb_period: 20
   bb_std: 2
 
-  # ATR-Based Trailing Stop (EXPERT)
-  trailing_stop_atr_multiplier: 3.0   # 3x ATR trailing stop
-  min_stop_pct: 0.08                   # 8% minimum stop (crypto volatility)
+  # ATR-Based Trailing Stop (EXPERT - widened for crypto volatility)
+  trailing_stop_atr_multiplier: 5.0   # 5x ATR trailing stop (was 3x - too tight)
+  min_stop_pct: 0.15                   # 15% minimum stop (was 8% - whipsawed)
 
   # Slippage & Position Sizing
   slippage: 0.001                      # 0.1% slippage assumption
@@ -37,8 +37,8 @@ strategy:
 # FEAR & GREED INDEX (SIZE ADJUSTMENT, NOT ENTRY/EXIT)
 # =============================================================================
 fng:
-  greed_threshold: 80          # Reduce size when FNG > 80
-  fear_threshold: 25           # Increase size when FNG < 25
+  greed_threshold: 100         # Disabled - don't block trend entries in bull markets
+  fear_threshold: 50           # Contrarian entries when FNG < 50 (loosened from 25)
   default_value: 50            # Fallback if API fails
 
   # Size adjustments based on FNG (EXPERT)
@@ -58,7 +58,7 @@ regime:
 
   # Choppiness Index
   chop_period: 14
-  chop_threshold: 61.8         # Above this = choppy/ranging market
+  chop_threshold: 70           # Above this = choppy/ranging market (raised from 61.8)
 
   # Market Structure
   swing_lookback: 10           # Bars for swing high/low detection

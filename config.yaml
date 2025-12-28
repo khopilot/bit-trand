@@ -8,8 +8,8 @@ strategy:
 
   # RSI Settings
   rsi_period: 14
-  rsi_momentum_low: 50      # Lower bound for momentum entry
-  rsi_momentum_high: 70     # Upper bound for momentum entry
+  rsi_momentum_low: 45      # Lower bound for momentum entry (widened from 50)
+  rsi_momentum_high: 75     # Upper bound for momentum entry (widened from 70)
   rsi_oversold: 35          # Oversold threshold for contrarian entry
   rsi_overbought: 75        # Overbought threshold for exit signal
 
@@ -17,16 +17,45 @@ strategy:
   bb_period: 20
   bb_std: 2
 
-  # Risk Management
-  trailing_stop_atr_multiplier: 3.0   # Dynamic stop = entry - (ATR * multiplier) - increased for close-to-close ATR
-  min_stop_pct: 0.08                  # Minimum 8% stop distance (wider for crypto volatility)
+  # Risk Management (ALPHA MAXIMIZER - trend-following with wide stops)
+  trailing_stop_atr_multiplier: 6.0   # 6.0x ATR trailing stop (wider for trend-following)
+  min_stop_pct: 0.20                  # 20% drawdown tolerance (ride trends, tighter in downtrends)
   slippage: 0.001                     # 0.1% slippage assumption
   max_position_pct: 0.25              # Max 25% of capital per trade
   risk_per_trade_pct: 0.01            # Risk 1% of capital per trade (conservative)
 
+  # Momentum Persistence (don't exit if trend intact)
+  persistence_rsi_threshold: 55       # Don't exit if RSI > this
+  persistence_ema_spread: 0.01        # Don't exit if EMA spread > 1%
+
+  # Re-entry Settings (don't sit in cash after stop-outs)
+  reentry_enabled: true
+  reentry_pullback_pct: 0.05          # Re-enter after 5% pullback
+  reentry_min_days: 2                 # Wait at least 2 days before re-entry
+
+  # Smart Cooldown (loss-streak based, not calendar)
+  max_consecutive_losses: 3           # Pause after 3 consecutive losses
+  min_confidence: 0.1                 # Low threshold for more trades
+
+  # Take-profit settings (REGIME-ADAPTIVE: values set in code by regime)
+  # STRONG_UPTREND: 100%/200%/300% - ride the trend
+  # WEAK_UPTREND: 40%/80%/120% - still ride but more conservative
+  # DOWNTREND: 8%/15%/25% - quick exits to lock in gains
+  enable_take_profit: true
+  tp_level_1: 0.40                    # +40% profit (weak uptrend default)
+  tp_level_2: 0.80                    # +80% profit
+  tp_level_3: 1.20                    # +120% profit
+
+  # Exit thresholds (relaxed from original)
+  ema_spread_exit: 0.01               # 1% EMA spread triggers exit (was 3%)
+  rsi_exit_threshold: 35              # RSI below this with weakness triggers exit
+  enable_blowoff_exit: true           # Enable blow-off top exits
+  blowoff_rsi: 80                     # RSI threshold for blow-off
+  blowoff_fng: 75                     # FNG threshold for blow-off
+
 fng:
-  greed_threshold: 80       # Extreme greed - avoid buying, consider selling
-  fear_threshold: 25        # Extreme fear - contrarian buy opportunity
+  greed_threshold: 100      # Disabled - don't block trend entries in bull markets
+  fear_threshold: 50        # Contrarian entries when FNG < 50 (loosened from 25)
   default_value: 50         # Neutral fallback when API fails
 
 api:
@@ -46,3 +75,23 @@ logging:
   level: INFO               # DEBUG, INFO, WARNING, ERROR, CRITICAL
   format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
   date_format: "%Y-%m-%d %H:%M:%S"
+
+# ML Regime Detection
+ml:
+  enabled: false                          # Toggle ML regime detection
+  model_path: "models/regime_classifier.pkl"
+  confidence_threshold: 0.6               # Min confidence to use ML prediction
+  training:
+    forward_days: 5                       # Days ahead to predict
+    up_threshold: 0.02                    # Return threshold for uptrend (2%)
+    down_threshold: -0.02                 # Return threshold for downtrend (-2%)
+
+# Bitcoin Blockchain Integration (FREE APIs - no node required)
+blockchain:
+  enabled: true                           # Toggle blockchain metrics
+  provider: "free_api"                    # "free_api" or "rpc" (rpc requires Bitcoin Core)
+  mempool_api: "https://mempool.space/api"    # Mempool.space (unlimited, no auth)
+  blockchair_api: "https://api.blockchair.com/bitcoin"  # Blockchair (1,000/day free)
+  large_tx_threshold: 100                 # BTC threshold for whale alerts
+  blockchair_daily_limit: 1000            # Rate limit for Blockchair
+  cache_ttl: 300                          # Cache metrics for 5 minutes

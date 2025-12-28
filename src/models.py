@@ -21,6 +21,13 @@ class SignalType(Enum):
     SELL_REVERSAL = "sell_reversal"
     SELL_BLOWOFF = "sell_blowoff"
     SELL_TRAILING_STOP = "sell_trailing_stop"
+    SELL_PARTIAL = "sell_partial"  # Partial take-profit exit
+
+    # SHORT position signals
+    SHORT_TREND = "short_trend"
+    SHORT_CONTRARIAN = "short_contrarian"
+    COVER_REVERSAL = "cover_reversal"
+    COVER_TRAILING_STOP = "cover_trailing_stop"
 
 
 class OrderStatus(Enum):
@@ -79,7 +86,16 @@ class Signal:
             SignalType.SELL_REVERSAL,
             SignalType.SELL_BLOWOFF,
             SignalType.SELL_TRAILING_STOP,
+            SignalType.SELL_PARTIAL,
         )
+
+    @property
+    def is_short(self) -> bool:
+        return self.signal_type in (SignalType.SHORT_TREND, SignalType.SHORT_CONTRARIAN)
+
+    @property
+    def is_cover(self) -> bool:
+        return self.signal_type in (SignalType.COVER_REVERSAL, SignalType.COVER_TRAILING_STOP)
 
 
 @dataclass
@@ -119,10 +135,12 @@ class Position:
     side: str = "long"
     entry_price: float = 0.0
     quantity: float = 0.0
+    initial_quantity: float = 0.0  # Track original size for partial exits
     entry_order_id: Optional[str] = None
     exit_order_id: Optional[str] = None
     stop_price: float = 0.0
     highest_price: float = 0.0
+    lowest_price: float = 0.0  # For SHORT trailing stops
     status: PositionStatus = PositionStatus.OPEN
     entry_time: datetime = field(default_factory=datetime.utcnow)
     exit_time: Optional[datetime] = None
@@ -130,6 +148,7 @@ class Position:
     realized_pnl: float = 0.0
     signal_type: SignalType = SignalType.NONE
     metadata: dict = field(default_factory=dict)
+    tp_executed: dict = field(default_factory=dict)  # Track which TP levels hit {price_mult: True}
 
     @property
     def is_open(self) -> bool:
@@ -143,22 +162,46 @@ class Position:
         """Calculate unrealized P&L at current price."""
         if not self.is_open:
             return 0.0
+        if self.side == "short":
+            # SHORT: profit when price drops
+            return (self.entry_price - current_price) * self.quantity
         return (current_price - self.entry_price) * self.quantity
 
     def unrealized_pnl_pct(self, current_price: float) -> float:
         """Calculate unrealized P&L as percentage."""
         if self.entry_price == 0:
             return 0.0
+        if self.side == "short":
+            # SHORT: profit when price drops
+            return ((self.entry_price - current_price) / self.entry_price) * 100
         return ((current_price - self.entry_price) / self.entry_price) * 100
 
     def update_trailing_stop(self, current_price: float, atr: float, multiplier: float, min_pct: float) -> float:
-        """Update trailing stop based on highest price and ATR."""
+        """Update trailing stop based on highest/lowest price and ATR."""
+        if self.side == "short":
+            return self._update_short_trailing_stop(current_price, atr, multiplier, min_pct)
+        return self._update_long_trailing_stop(current_price, atr, multiplier, min_pct)
+
+    def _update_long_trailing_stop(self, current_price: float, atr: float, multiplier: float, min_pct: float) -> float:
+        """Update trailing stop for LONG positions (stop below price)."""
         if current_price > self.highest_price:
             self.highest_price = current_price
 
         atr_stop = self.highest_price - (atr * multiplier)
         min_stop = self.highest_price * (1 - min_pct)
         self.stop_price = max(atr_stop, min_stop)
+        return self.stop_price
+
+    def _update_short_trailing_stop(self, current_price: float, atr: float, multiplier: float, min_pct: float) -> float:
+        """Update trailing stop for SHORT positions (stop above price)."""
+        # Initialize lowest_price on first update
+        if self.lowest_price == 0.0 or current_price < self.lowest_price:
+            self.lowest_price = current_price
+
+        # Stop is ABOVE the lowest price for shorts
+        atr_stop = self.lowest_price + (atr * multiplier)
+        min_stop = self.lowest_price * (1 + min_pct)
+        self.stop_price = min(atr_stop, min_stop)  # Use min for shorts (tighter stop)
         return self.stop_price
 
 
@@ -170,27 +213,27 @@ class StrategyConfig:
     ema_fast: int = 12
     ema_slow: int = 26
 
-    # RSI settings
+    # RSI settings (MAXIMUM TRADES MODE)
     rsi_period: int = 14
-    rsi_momentum_low: int = 50
-    rsi_momentum_high: int = 70
-    rsi_oversold: int = 35
-    rsi_overbought: int = 75
+    rsi_momentum_low: int = 30   # Was 45 - enter much earlier in trends
+    rsi_momentum_high: int = 85  # Was 75 - capture strong momentum phases
+    rsi_oversold: int = 45       # Was 40 - more contrarian opportunities
+    rsi_overbought: int = 80     # Was 75 - stay in longer
 
     # Bollinger Bands
     bb_period: int = 20
     bb_std: float = 2.0
 
-    # Risk management
-    trailing_stop_atr_multiplier: float = 3.0
-    min_stop_pct: float = 0.08
+    # Risk management (MAXIMUM TREND CAPTURE)
+    trailing_stop_atr_multiplier: float = 10.0  # Very wide - stay in trends
+    min_stop_pct: float = 0.30  # Tolerate 30% drawdown for major moves
     slippage: float = 0.001
-    max_position_pct: float = 0.25
-    risk_per_trade_pct: float = 0.01
+    max_position_pct: float = 0.95  # Near 100% - maximize trend capture
+    risk_per_trade_pct: float = 0.02  # Double the risk per trade
 
-    # Sentiment thresholds
-    fng_greed_threshold: int = 80
-    fng_fear_threshold: int = 25
+    # Sentiment thresholds (loosened for more trades)
+    fng_greed_threshold: int = 100  # Was 80 - blocked trend entries in bull markets
+    fng_fear_threshold: int = 50    # Was 25 - contrarian only triggered 0.25% of days
     fng_default: int = 50
 
     @classmethod
@@ -203,19 +246,19 @@ class StrategyConfig:
             ema_fast=strat.get("ema_fast", 12),
             ema_slow=strat.get("ema_slow", 26),
             rsi_period=strat.get("rsi_period", 14),
-            rsi_momentum_low=strat.get("rsi_momentum_low", 50),
-            rsi_momentum_high=strat.get("rsi_momentum_high", 70),
-            rsi_oversold=strat.get("rsi_oversold", 35),
+            rsi_momentum_low=strat.get("rsi_momentum_low", 45),
+            rsi_momentum_high=strat.get("rsi_momentum_high", 75),
+            rsi_oversold=strat.get("rsi_oversold", 40),
             rsi_overbought=strat.get("rsi_overbought", 75),
             bb_period=strat.get("bb_period", 20),
             bb_std=strat.get("bb_std", 2.0),
-            trailing_stop_atr_multiplier=strat.get("trailing_stop_atr_multiplier", 3.0),
-            min_stop_pct=strat.get("min_stop_pct", 0.08),
+            trailing_stop_atr_multiplier=strat.get("trailing_stop_atr_multiplier", 5.0),
+            min_stop_pct=strat.get("min_stop_pct", 0.15),
             slippage=strat.get("slippage", 0.001),
             max_position_pct=strat.get("max_position_pct", 0.25),
             risk_per_trade_pct=strat.get("risk_per_trade_pct", 0.01),
-            fng_greed_threshold=fng.get("greed_threshold", 80),
-            fng_fear_threshold=fng.get("fear_threshold", 25),
+            fng_greed_threshold=fng.get("greed_threshold", 100),
+            fng_fear_threshold=fng.get("fear_threshold", 50),
             fng_default=fng.get("default_value", 50),
         )
 

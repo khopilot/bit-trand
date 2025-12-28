@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "crypto": {
+      "type": "stdio",
+      "command": "/root/bit-trand/venv/bin/ccxt-server",
+      "args": [],
+      "env": {
+        "CCXT_EXCHANGE": "binance",
+        "MCP_TIMEOUT": "15000"
+      }
+    }
+  }
+}

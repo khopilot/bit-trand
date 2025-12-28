@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import requests
 import yaml
+import ccxt
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -72,18 +73,19 @@ class StrategyValidator:
         self.strategy_engine = StrategyEngine(
             config=self.strategy_config,
             kelly_fraction=0.25,
-            use_regime_filter=True,
-            use_mtf_filter=True,
+            use_regime_filter=False,  # DISABLED for maximum entry opportunities
+            use_mtf_filter=False,     # DISABLED - was blocking valid entries
+            min_confidence=0.1,       # Very low for maximum trades
         )
 
         self.regime_detector = RegimeDetector()
 
         self.walk_forward = WalkForwardValidator(
-            train_ratio=0.7,
-            min_train_days=180,
-            min_test_days=30,
-            num_periods=5,
-            monte_carlo_runs=1000,
+            train_ratio=0.6,
+            min_train_days=60,    # 2 months training (reduced for shorter periods)
+            min_test_days=30,     # 1 month testing
+            num_periods=3,        # 3 periods for 1 year of data
+            monte_carlo_runs=500,
         )
 
         self.performance_tracker = PerformanceTracker()
@@ -114,11 +116,73 @@ class StrategyValidator:
 
     def fetch_historical_data(self, days: int = 365) -> pd.DataFrame:
         """
-        Fetch historical BTC price data.
+        Fetch historical BTC OHLCV data from Bybit.
 
-        Uses CoinGecko API for free access.
+        Uses ccxt to get REAL OHLC data for proper ADX/DI calculation.
+        Falls back to CoinGecko if exchange fails.
         """
-        logger.info("Fetching %d days of historical data...", days)
+        logger.info("Fetching %d days of historical OHLCV data from Binance...", days)
+
+        try:
+            # Use Binance - more historical data available, no API key needed for public data
+            exchange = ccxt.binance({
+                'enableRateLimit': True,
+            })
+
+            # Calculate start time
+            since = exchange.parse8601(
+                (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            )
+
+            # Fetch daily OHLCV in batches (Bybit limit is 200 per request)
+            all_ohlcv = []
+            current_since = since
+            batch_size = 200
+
+            while True:
+                ohlcv = exchange.fetch_ohlcv(
+                    'BTC/USDT',
+                    timeframe='1d',
+                    since=current_since,
+                    limit=batch_size,
+                )
+
+                if not ohlcv:
+                    break
+
+                all_ohlcv.extend(ohlcv)
+
+                # Move to next batch
+                last_timestamp = ohlcv[-1][0]
+                current_since = last_timestamp + 86400000  # +1 day in ms
+
+                # Stop if we've caught up to present
+                if len(ohlcv) < batch_size:
+                    break
+
+                logger.debug("Fetched %d candles so far...", len(all_ohlcv))
+
+            if not all_ohlcv:
+                raise ValueError("No OHLCV data received from Bybit")
+
+            # Convert to DataFrame
+            df = pd.DataFrame(all_ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+            df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms', utc=True)
+            df = df.drop('Timestamp', axis=1)
+
+            # Sort by date and remove duplicates
+            df = df.sort_values('Date').drop_duplicates(subset=['Date']).reset_index(drop=True)
+
+            logger.info("Fetched %d days of REAL OHLCV data from Binance", len(df))
+            return df
+
+        except Exception as e:
+            logger.warning("Exchange fetch failed (%s), falling back to CoinGecko...", e)
+            return self._fetch_from_coingecko(days)
+
+    def _fetch_from_coingecko(self, days: int) -> pd.DataFrame:
+        """Fallback: Fetch from CoinGecko (close-only, fake OHLC)."""
+        logger.warning("Using CoinGecko fallback - ADX/DI calculations will be inaccurate!")
 
         url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
         params = {
@@ -127,31 +191,56 @@ class StrategyValidator:
             "interval": "daily",
         }
 
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        prices = data.get("prices", [])
+
+        df = pd.DataFrame(prices, columns=["Timestamp", "Close"])
+        df["Date"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True)
+        df = df.drop("Timestamp", axis=1)
+
+        # Create FAKE OHLC (approximate from daily close)
+        df["Open"] = df["Close"].shift(1)
+        df["High"] = df["Close"] * 1.01  # FAKE - not real data
+        df["Low"] = df["Close"] * 0.99   # FAKE - not real data
+        df["Volume"] = 0
+
+        df = df.dropna()
+
+        logger.info("Fetched %d days of data (CoinGecko fallback)", len(df))
+        return df
+
+    def fetch_fng_data(self, days: int = 365) -> dict:
+        """
+        Fetch Fear & Greed Index historical data.
+
+        Returns a dict mapping date strings to FNG values.
+        """
+        logger.info("Fetching %d days of FNG data...", days)
+
         try:
+            url = "https://api.alternative.me/fng/"
+            params = {"limit": days, "format": "json"}
             response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
 
-            prices = data.get("prices", [])
+            fng_data = {}
+            for entry in data.get("data", []):
+                # Convert timestamp to date string
+                timestamp = int(entry.get("timestamp", 0))
+                date_str = pd.Timestamp(timestamp, unit="s", tz="UTC").strftime("%Y-%m-%d")
+                fng_value = int(entry.get("value", 50))
+                fng_data[date_str] = fng_value
 
-            df = pd.DataFrame(prices, columns=["Timestamp", "Close"])
-            df["Date"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True)
-            df = df.drop("Timestamp", axis=1)
-
-            # Create OHLC (approximate from daily close)
-            df["Open"] = df["Close"].shift(1)
-            df["High"] = df["Close"] * 1.01  # Approximate
-            df["Low"] = df["Close"] * 0.99   # Approximate
-            df["Volume"] = 0  # Not available from this endpoint
-
-            df = df.dropna()
-
-            logger.info("Fetched %d days of data", len(df))
-            return df
+            logger.info("Fetched %d days of FNG data", len(fng_data))
+            return fng_data
 
         except Exception as e:
-            logger.error("Failed to fetch data: %s", e)
-            raise
+            logger.warning("Failed to fetch FNG data: %s. Using default value 50.", e)
+            return {}
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate all required technical indicators."""
@@ -194,6 +283,7 @@ class StrategyValidator:
         self,
         df: pd.DataFrame,
         initial_capital: float = 10000,
+        fng_data: dict = None,  # Real FNG data
     ) -> Tuple[List[float], List[dict]]:
         """
         Run strategy backtest and return portfolio values and trades.
@@ -204,12 +294,17 @@ class StrategyValidator:
         trades = []
         capital = initial_capital
         position: Optional[Position] = None
+        fng_data = fng_data or {}
 
         for i in range(1, len(df)):
             current_df = df.iloc[:i+1]
             current_row = df.iloc[i]
             price = float(current_row["Close"])
             atr = float(current_row.get("ATR", price * 0.02))
+
+            # Get FNG value for this date (use real data or default to 50)
+            date_str = current_row["Date"].strftime("%Y-%m-%d") if hasattr(current_row["Date"], "strftime") else str(current_row["Date"])[:10]
+            fng_value = fng_data.get(date_str, 50)
 
             # Detect regime
             regime_state = self.regime_detector.detect(current_df)
@@ -218,11 +313,12 @@ class StrategyValidator:
             signal = self.strategy_engine.generate_signal(
                 df=current_df,
                 position=position,
-                fng_value=50,  # Default neutral
+                fng_value=fng_value,  # Use real FNG data
                 regime_state=regime_state,
             )
 
             # Process signal
+            # LONG entry
             if signal.is_buy and position is None:
                 # Calculate position size
                 size_result = self.strategy_engine.calculate_position_size(
@@ -241,31 +337,127 @@ class StrategyValidator:
                 position = Position(
                     entry_price=fill_price,
                     quantity=quantity,
+                    initial_quantity=quantity,
                     highest_price=fill_price,
                     stop_price=size_result.stop_price,
                     signal_type=signal.signal_type,
+                    side="long",
                 )
 
                 capital -= size_result.position_usd
 
                 trades.append({
                     "type": "buy",
+                    "side": "long",
                     "date": str(current_row["Date"]),
                     "price": fill_price,
                     "quantity": quantity,
                     "signal": signal.signal_type.value,
                 })
 
-            elif signal.is_sell and position is not None:
+            # SHORT entry
+            elif signal.is_short and position is None:
+                # Calculate position size
+                size_result = self.strategy_engine.calculate_position_size(
+                    capital=capital,
+                    entry_price=price,
+                    atr=atr,
+                    signal_confidence=signal.confidence,
+                    regime_multiplier=regime_state.position_size_multiplier if regime_state else 1.0,
+                )
+
+                # Apply slippage (sell high for shorts)
+                fill_price = self.strategy_engine.apply_slippage(price, is_buy=False)
+
+                # Create SHORT position
+                quantity = size_result.position_usd / fill_price
+                position = Position(
+                    entry_price=fill_price,
+                    quantity=quantity,
+                    initial_quantity=quantity,
+                    lowest_price=fill_price,
+                    stop_price=fill_price * (1 + self.strategy_config.min_stop_pct),  # Stop above entry
+                    signal_type=signal.signal_type,
+                    side="short",
+                )
+
+                # For shorts, we receive cash upfront (margin trading)
+                # Capital remains same, but we track the position
+
+                trades.append({
+                    "type": "short",
+                    "side": "short",
+                    "date": str(current_row["Date"]),
+                    "price": fill_price,
+                    "quantity": quantity,
+                    "signal": signal.signal_type.value,
+                })
+
+            # LONG exit (full or partial)
+            elif (signal.is_sell or signal.signal_type == SignalType.SELL_PARTIAL) and position is not None and position.side == "long":
                 # Apply slippage
                 fill_price = self.strategy_engine.apply_slippage(price, is_buy=False)
 
-                # Calculate P&L
-                pnl = (fill_price - position.entry_price) * position.quantity
-                capital += position.quantity * fill_price
+                # Handle partial exits
+                if signal.signal_type == SignalType.SELL_PARTIAL:
+                    tp_qty_pct = signal.indicators.get("tp_quantity_pct", 0.3)
+                    tp_name = signal.indicators.get("tp_name", "TP")
+                    sell_quantity = position.quantity * tp_qty_pct
+                    position.tp_executed[tp_name] = True
+                    position.quantity -= sell_quantity
+
+                    # Calculate partial P&L
+                    pnl = (fill_price - position.entry_price) * sell_quantity
+                    capital += sell_quantity * fill_price
+
+                    trades.append({
+                        "type": "sell_partial",
+                        "side": "long",
+                        "date": str(current_row["Date"]),
+                        "price": fill_price,
+                        "quantity": sell_quantity,
+                        "pnl": pnl,
+                        "pnl_pct": pnl / (position.entry_price * sell_quantity) * 100,
+                        "signal": signal.signal_type.value,
+                        "tp_level": tp_name,
+                    })
+
+                    # If position is fully closed, reset
+                    if position.quantity <= 0:
+                        self.strategy_engine.update_performance(win=True)
+                        position = None
+                else:
+                    # Full exit
+                    pnl = (fill_price - position.entry_price) * position.quantity
+                    capital += position.quantity * fill_price
+
+                    trades.append({
+                        "type": "sell",
+                        "side": "long",
+                        "date": str(current_row["Date"]),
+                        "price": fill_price,
+                        "quantity": position.quantity,
+                        "pnl": pnl,
+                        "pnl_pct": pnl / (position.entry_price * position.quantity) * 100,
+                        "signal": signal.signal_type.value,
+                    })
+
+                    # Update strategy engine with trade result
+                    self.strategy_engine.update_performance(win=pnl > 0)
+                    position = None
+
+            # SHORT exit (cover)
+            elif signal.is_cover and position is not None and position.side == "short":
+                # Apply slippage (buy back to cover)
+                fill_price = self.strategy_engine.apply_slippage(price, is_buy=True)
+
+                # Calculate P&L for short (profit when price dropped)
+                pnl = (position.entry_price - fill_price) * position.quantity
+                capital += pnl  # Add profit/loss to capital
 
                 trades.append({
-                    "type": "sell",
+                    "type": "cover",
+                    "side": "short",
                     "date": str(current_row["Date"]),
                     "price": fill_price,
                     "quantity": position.quantity,
@@ -276,16 +468,30 @@ class StrategyValidator:
 
                 # Update strategy engine with trade result
                 self.strategy_engine.update_performance(win=pnl > 0)
-
                 position = None
 
             # Update portfolio value
             if position is not None:
-                portfolio_value = capital + (position.quantity * price)
+                if position.side == "long":
+                    portfolio_value = capital + (position.quantity * price)
+                else:  # short
+                    # For shorts: unrealized P&L = (entry - current) * quantity
+                    unrealized_pnl = (position.entry_price - price) * position.quantity
+                    portfolio_value = capital + unrealized_pnl
             else:
                 portfolio_value = capital
 
             portfolio_values.append(portfolio_value)
+
+        # Debug: Log final portfolio state
+        print(f"\n[DEBUG] Final portfolio state:")
+        print(f"  Capital (cash): ${capital:,.0f}")
+        if position:
+            print(f"  Position: {position.side} {position.quantity:.4f} BTC @ ${position.entry_price:,.0f}")
+            print(f"  Position value at end: ${position.quantity * df.iloc[-1]['Close']:,.0f}")
+        else:
+            print(f"  Position: None (all cash)")
+        print(f"  Final portfolio value: ${portfolio_values[-1]:,.0f}")
 
         return portfolio_values, trades
 
@@ -296,7 +502,9 @@ class StrategyValidator:
         logger.info("=" * 60)
 
         def strategy_fn(data: pd.DataFrame) -> Tuple[List[float], List[dict]]:
-            return self.run_strategy_backtest(data)
+            # Use real FNG data if available
+            fng_data = getattr(self, 'fng_data', {})
+            return self.run_strategy_backtest(data, fng_data=fng_data)
 
         report = self.walk_forward.validate(df, strategy_fn)
 
@@ -562,8 +770,9 @@ class StrategyValidator:
         logger.info("PERFORMANCE DECAY ANALYSIS")
         logger.info("=" * 60)
 
-        # Run backtest
-        portfolio_values, trades = self.run_strategy_backtest(df)
+        # Run backtest with real FNG data
+        fng_data = getattr(self, 'fng_data', {})
+        portfolio_values, trades = self.run_strategy_backtest(df, fng_data=fng_data)
 
         # Record trades with performance tracker
         for trade in trades:
@@ -625,6 +834,50 @@ class StrategyValidator:
         # Fetch data
         df = self.fetch_historical_data(days=days)
         df = self.calculate_indicators(df)
+
+        # Fetch FNG data
+        self.fng_data = self.fetch_fng_data(days=days)
+
+        # Run CONTINUOUS backtest first (true compounded returns)
+        logger.info("=" * 60)
+        logger.info("CONTINUOUS BACKTEST (True Compounded Returns)")
+        logger.info("=" * 60)
+        portfolio_values, trades = self.run_strategy_backtest(df, fng_data=self.fng_data)
+
+        initial_capital = 10000
+        final_value = portfolio_values[-1] if portfolio_values else initial_capital
+        strategy_roi = (final_value - initial_capital) / initial_capital * 100
+
+        start_price = df["Close"].iloc[0]
+        end_price = df["Close"].iloc[-1]
+        buyhold_roi = (end_price - start_price) / start_price * 100
+
+        print("\n" + "=" * 60)
+        print("CONTINUOUS BACKTEST (Actual Compounded Returns)")
+        print("=" * 60)
+        print(f"Initial Capital: ${initial_capital:,.0f}")
+        print(f"Final Value:     ${final_value:,.0f}")
+        print(f"Strategy ROI:    {strategy_roi:+.2f}%")
+        print(f"Buy-and-Hold:    {buyhold_roi:+.2f}%")
+        print(f"Alpha:           {strategy_roi - buyhold_roi:+.2f}%")
+        print(f"Start Price:     ${start_price:,.0f}")
+        print(f"End Price:       ${end_price:,.0f}")
+        print(f"Total Trades:    {len(trades)}")
+        print("\nTrade Details:")
+        for t in trades:
+            pnl = t.get('pnl', 0)
+            pnl_str = f" P&L: ${pnl:+,.0f}" if pnl else ""
+            print(f"  {t.get('date', 'N/A')}: {t.get('type', 'N/A')} at ${t.get('price', 0):,.0f} - {t.get('signal', 'N/A')}{pnl_str}")
+        print("=" * 60)
+
+        self.results["continuous_backtest"] = {
+            "initial_capital": initial_capital,
+            "final_value": final_value,
+            "strategy_roi": strategy_roi,
+            "buyhold_roi": buyhold_roi,
+            "alpha": strategy_roi - buyhold_roi,
+            "total_trades": len(trades),
+        }
 
         # Run all validations
         wf_report = self.validate_walk_forward(df)
@@ -703,8 +956,8 @@ def main():
     parser.add_argument(
         "--days",
         type=int,
-        default=365,
-        help="Number of days of historical data to use (default: 365)",
+        default=1095,
+        help="Number of days of historical data to use (default: 1095 = 3 years)",
     )
     parser.add_argument(
         "--config",

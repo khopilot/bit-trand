@@ -367,6 +367,19 @@ def calculate_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         # Fallback: close-to-close volatility proxy
         df["ATR"] = df["Close"].pct_change().abs().rolling(window=14).mean() * df["Close"]
 
+    # MACD (Moving Average Convergence Divergence)
+    df["MACD"] = df["EMA_12"] - df["EMA_26"]
+    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_Histogram"] = df["MACD"] - df["MACD_Signal"]
+
+    # Volume Analysis
+    if "Volume" in df.columns:
+        df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
+        df["Volume_Ratio"] = df["Volume"] / df["Volume_MA"].replace(0, np.finfo(float).eps)
+    else:
+        df["Volume_MA"] = 0.0
+        df["Volume_Ratio"] = 1.0
+
     # Forward fill NaN values for indicators
     df = df.ffill().bfill()
 

@@ -106,6 +106,8 @@ def run_elite_strategy(
     position = None
     entry_price = 0.0
     highest_price_since_buy = 0.0
+    tp_executed = {"TP1": False, "TP2": False, "TP3": False}  # Track take-profit levels
+    original_btc_qty = 0.0  # Track original position size
 
     # Track FNG data quality
     fng_missing_count = 0
@@ -176,32 +178,85 @@ def run_elite_strategy(
             min_stop = highest_price_since_buy * min_stop_pct
             stop_price = highest_price_since_buy - max(atr_stop, min_stop)
 
-            # Exit conditions
-            trend_reversal = (prev_ema_12 >= prev_ema_26) and (ema_12 < ema_26)
-            blow_off_top = (price > bb_upper) and (rsi > rsi_overbought) and (fng_val > fng_greed)
-            stop_hit = price < stop_price
+            # Calculate unrealized profit
+            unrealized_pct = (price - entry_price) / entry_price
 
-            if trend_reversal or blow_off_top or stop_hit:
-                exec_price = apply_slippage(price, is_buy=False, slippage_pct=slippage_pct)
-                cash = btc * exec_price
-                btc = 0.0
-                position = None
+            # Take-profit levels (Conservative: 15/30/50%)
+            tp_levels = [
+                (0.15, 0.33, "TP1"),  # +15% profit = sell 33%
+                (0.30, 0.33, "TP2"),  # +30% profit = sell 33%
+                (0.50, 0.34, "TP3"),  # +50% profit = sell 34%
+            ]
 
-                if stop_hit:
-                    reason = f"ATR Stop (${stop_price:,.0f})"
-                elif blow_off_top:
-                    reason = "Blow-off Top"
-                else:
-                    reason = "Trend Reversal"
+            # Check take-profit exits
+            for tp_target, tp_sell_pct, tp_name in tp_levels:
+                if unrealized_pct >= tp_target and not tp_executed[tp_name]:
+                    tp_executed[tp_name] = True
+                    sell_qty = original_btc_qty * tp_sell_pct
+                    sell_qty = min(sell_qty, btc)  # Don't sell more than we have
 
-                pnl_pct = ((exec_price - entry_price) / entry_price) * 100
-                ledger.append(
-                    f"{date}: SELL at ${exec_price:,.2f} ({reason} | FNG: {int(fng_val)} | PnL: {pnl_pct:+.1f}%)"
+                    if sell_qty > 0:
+                        exec_price = apply_slippage(price, is_buy=False, slippage_pct=slippage_pct)
+                        cash += sell_qty * exec_price
+                        btc -= sell_qty
+
+                        pnl_pct = ((exec_price - entry_price) / entry_price) * 100
+                        ledger.append(
+                            f"{date}: SELL {tp_sell_pct*100:.0f}% at ${exec_price:,.2f} ({tp_name} +{tp_target*100:.0f}% | PnL: {pnl_pct:+.1f}%)"
+                        )
+                        logger.debug(
+                            "%s: %s sell %.4f BTC at $%.2f, PnL=%.1f%%",
+                            date, tp_name, sell_qty, exec_price, pnl_pct,
+                        )
+
+                        # If all BTC sold, close position
+                        if btc < 0.0001:
+                            btc = 0.0
+                            position = None
+                            tp_executed = {"TP1": False, "TP2": False, "TP3": False}
+                    break  # Only one TP per day
+
+            # Exit conditions (if still have position)
+            if position == "LONG" and btc > 0:
+                # Trailing stop from highs
+                stop_hit = price < stop_price
+
+                # Trend reversal - RELAXED (1% spread instead of requiring all conditions)
+                trend_reversal = (prev_ema_12 >= prev_ema_26) and (ema_12 < ema_26)
+                ema_spread_pct = (ema_26 - ema_12) / ema_26 * 100 if ema_26 > 0 else 0
+
+                # Exit on: stop hit OR (death cross with 1% spread) OR strong weakness
+                should_exit = (
+                    stop_hit
+                    or (trend_reversal and ema_spread_pct > 1.0)
+                    or (ema_spread_pct > 2.0 and rsi < 35)
                 )
-                logger.debug(
-                    "%s: SELL at $%.2f, reason=%s, PnL=%.1f%%",
-                    date, exec_price, reason, pnl_pct,
-                )
+
+                # Blow-off top (re-enabled with balanced thresholds)
+                blow_off_top = (price > bb_upper * 1.02) and (rsi > 80) and (fng_val > 75)
+
+                if should_exit or blow_off_top:
+                    exec_price = apply_slippage(price, is_buy=False, slippage_pct=slippage_pct)
+                    cash += btc * exec_price
+                    btc = 0.0
+                    position = None
+                    tp_executed = {"TP1": False, "TP2": False, "TP3": False}
+
+                    if stop_hit:
+                        reason = f"Trailing Stop (${stop_price:,.0f})"
+                    elif blow_off_top:
+                        reason = "Blow-off Top"
+                    else:
+                        reason = f"Trend Reversal (spread={ema_spread_pct:.1f}%)"
+
+                    pnl_pct = ((exec_price - entry_price) / entry_price) * 100
+                    ledger.append(
+                        f"{date}: SELL at ${exec_price:,.2f} ({reason} | FNG: {int(fng_val)} | PnL: {pnl_pct:+.1f}%)"
+                    )
+                    logger.debug(
+                        "%s: SELL at $%.2f, reason=%s, PnL=%.1f%%",
+                        date, exec_price, reason, pnl_pct,
+                    )
 
         # --- BUY LOGIC ---
         elif position is None:
@@ -257,6 +312,8 @@ def run_elite_strategy(
                 position = "LONG"
                 entry_price = exec_price
                 highest_price_since_buy = price
+                original_btc_qty = btc  # Track for take-profit calculations
+                tp_executed = {"TP1": False, "TP2": False, "TP3": False}  # Reset TP tracking
 
                 entry_type = "Smart Trend" if smart_trend_entry else "Sniper Bottom"
                 ledger.append(

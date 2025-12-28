@@ -29,6 +29,12 @@ from .risk_manager import RiskManager, Watchdog
 from .strategy_engine import StrategyEngine
 from .telegram_control import TelegramControl
 
+# Optional blockchain service
+try:
+    from .blockchain_service import BlockchainDataService
+except ImportError:
+    BlockchainDataService = None
+
 logger = logging.getLogger("btc_trader.orchestrator")
 
 
@@ -127,6 +133,9 @@ class Orchestrator:
         # Strategy configuration
         self.strategy_config = StrategyConfig.from_config(self.config)
 
+        # ML configuration
+        ml_config = self.config.get("ml", {})
+
         # Data service
         self.data_service = DataService(
             exchange_id="binance",
@@ -137,8 +146,11 @@ class Orchestrator:
             api_secret=api_secret if not paper_trading else None,
         )
 
-        # Strategy engine
-        self.strategy_engine = StrategyEngine(self.strategy_config)
+        # Strategy engine (with optional ML regime detection)
+        self.strategy_engine = StrategyEngine(
+            config=self.strategy_config,
+            ml_config=ml_config,
+        )
 
         # Executor service
         self.executor = ExecutorService(
@@ -174,6 +186,22 @@ class Orchestrator:
             self.database = Database(db_url)
         else:
             self.database = InMemoryDatabase()
+
+        # Blockchain service (optional - uses free APIs by default)
+        blockchain_config = self.config.get("blockchain", {})
+        self.blockchain_enabled = blockchain_config.get("enabled", False)
+        self.blockchain_service = None
+
+        if self.blockchain_enabled and BlockchainDataService:
+            self.blockchain_service = BlockchainDataService(
+                mempool_api=blockchain_config.get("mempool_api", "https://mempool.space/api"),
+                blockchair_api=blockchain_config.get("blockchair_api", "https://api.blockchair.com/bitcoin"),
+                large_tx_threshold=blockchain_config.get("large_tx_threshold", 100),
+                blockchair_daily_limit=blockchain_config.get("blockchair_daily_limit", 1000),
+                cache_ttl=blockchain_config.get("cache_ttl", 300),
+                enabled=True,
+            )
+            logger.info("BlockchainDataService initialized (free APIs)")
 
         # Register data callback
         self.data_service.add_candle_callback(self._on_new_candle)
@@ -335,12 +363,37 @@ class Orchestrator:
         # Get Fear & Greed (default to neutral for now)
         fng_value = self.config.get("fng", {}).get("default_value", 50)
 
+        # Get on-chain signal adjustment (if blockchain enabled)
+        onchain_confidence_adj = 1.0
+        if self.blockchain_service:
+            try:
+                onchain_signal = await self.blockchain_service.get_on_chain_signal()
+                if onchain_signal:
+                    onchain_confidence_adj = onchain_signal.confidence_adjustment
+                    logger.debug(
+                        "On-chain signal: %s (adj=%.2f)",
+                        onchain_signal.recommendation,
+                        onchain_confidence_adj,
+                    )
+            except Exception as e:
+                logger.warning("Failed to get on-chain signal: %s", e)
+
         # Generate signal
         signal = self.strategy_engine.generate_signal(
             df=df,
             position=self._position,
             fng_value=fng_value,
         )
+
+        # Apply on-chain confidence adjustment
+        if signal.signal_type != SignalType.NONE and onchain_confidence_adj != 1.0:
+            original_confidence = signal.confidence
+            signal.confidence = min(max(signal.confidence * onchain_confidence_adj, 0.0), 1.0)
+            logger.debug(
+                "Adjusted signal confidence: %.2f -> %.2f (on-chain)",
+                original_confidence,
+                signal.confidence,
+            )
 
         if signal.signal_type == SignalType.NONE:
             return
@@ -358,11 +411,13 @@ class Orchestrator:
             balance = self.executor.get_balance()
             atr = df["ATR"].iloc[-1] if "ATR" in df.columns else signal.price * 0.02
 
-            position_size_usd, _, stop_price = self.strategy_engine.calculate_position_size(
+            size_result = self.strategy_engine.calculate_position_size(
                 capital=balance.total,
                 entry_price=signal.price,
                 atr=atr,
             )
+            position_size_usd = size_result.position_usd
+            stop_price = size_result.stop_price
 
         # Check risk limits
         risk_check = self.risk_manager.check_trade(
@@ -452,6 +507,10 @@ class Orchestrator:
         await self.data_service.stop()
         await self.database.close()
 
+        # Close blockchain service
+        if self.blockchain_service:
+            await self.blockchain_service.close()
+
         logger.info("Shutdown complete")
 
     async def run_backtest(self, days: int = 365) -> dict:
@@ -497,11 +556,12 @@ class Orchestrator:
                 balance = self.executor.get_balance()
 
                 if signal.is_buy:
-                    position_size, _, _ = self.strategy_engine.calculate_position_size(
+                    size_result = self.strategy_engine.calculate_position_size(
                         capital=balance.total,
                         entry_price=signal.price,
                         atr=atr,
                     )
+                    position_size = size_result.position_usd
                 else:
                     position_size = 0
 
