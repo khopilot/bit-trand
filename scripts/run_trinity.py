@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -119,6 +120,16 @@ async def main_async(
         notional_usd=notional_usd,
         telegram_enabled=False,  # Use shared Telegram control
     )
+
+    # Centralized signal handling - stops ALL bots together
+    def handle_shutdown(signum, frame):
+        logger.info("Shutdown signal received, stopping all bots...")
+        arb_trader.stop()
+        dir_trader.stop()
+        beast_trader.stop()
+
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
 
     # Initialize shared Telegram control
     telegram = None

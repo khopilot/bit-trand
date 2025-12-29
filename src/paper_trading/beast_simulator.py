@@ -104,9 +104,7 @@ class BeastPaperTrader:
         self._daily_start_pnl: float = 0.0
         self._daily_start_time: Optional[datetime] = None
 
-        # Signal handlers
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
+        # Signal handlers removed - let run_trinity.py handle signals centrally
 
         logger.info(
             "BeastPaperTrader initialized: notional=$%.2f, telegram=%s",

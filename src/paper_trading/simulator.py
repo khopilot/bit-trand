@@ -82,9 +82,7 @@ class FundingArbPaperTrader:
         self._last_rate_check: Optional[datetime] = None
         self._processed_funding_times: set = set()
 
-        # Set up signal handlers for graceful shutdown
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
+        # Signal handlers removed - let run_trinity.py handle signals centrally
 
         logger.info(
             "FundingArbPaperTrader initialized: notional=$%.2f, symbol=%s, telegram=%s",

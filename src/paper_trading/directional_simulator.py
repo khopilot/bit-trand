@@ -81,9 +81,7 @@ class DirectionalPaperTrader:
         self._last_signal_check: Optional[datetime] = None
         self._current_indicators: Dict = {}
 
-        # Signal handlers
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
+        # Signal handlers removed - let run_trinity.py handle signals centrally
 
         logger.info(
             "DirectionalPaperTrader initialized: notional=$%.2f, telegram=%s",
