@@ -36,6 +36,16 @@ from src.paper_trading.beast_tracker import BeastTracker, BeastMode, HEDGE_RATIO
 from src.paper_trading.funding_fetcher import BinanceFundingFetcher
 from src.paper_trading.telegram_notifier import TelegramNotifier
 
+# Predator integration (optional)
+try:
+    from src.predator import PredatorBot
+    from src.predator.conviction_scorer import ConvictionScore
+    HAS_PREDATOR = True
+except ImportError:
+    HAS_PREDATOR = False
+    PredatorBot = None
+    ConvictionScore = None
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -83,10 +93,16 @@ class BeastPaperTrader:
     DIRECTIONAL_STOP_PCT = 0.05  # 5% trailing stop
     DAILY_LOSS_LIMIT_PCT = 0.03  # 3% daily loss -> return to neutral
 
+    # Predator integration thresholds
+    PREDATOR_HIGH_CONVICTION = 75      # Upgrade/initiate directional
+    PREDATOR_MODERATE_CONVICTION = 50  # Downgrade on conflict
+    PREDATOR_CACHE_TTL_MINUTES = 5     # Cache Predator results
+
     def __init__(
         self,
         notional_usd: float = 10000.0,
         telegram_enabled: bool = True,
+        predator: Optional["PredatorBot"] = None,
     ):
         self.notional_usd = notional_usd
 
@@ -95,6 +111,11 @@ class BeastPaperTrader:
         self.fetcher = BinanceFundingFetcher()
         self.telegram = TelegramNotifier() if telegram_enabled else None
         self._telegram_enabled = telegram_enabled
+
+        # Predator integration
+        self._predator = predator
+        self._predator_cache: Optional["ConvictionScore"] = None
+        self._predator_cache_time: Optional[datetime] = None
 
         # State
         self._running = False
@@ -106,9 +127,10 @@ class BeastPaperTrader:
 
         # Signal handlers removed - let run_trinity.py handle signals centrally
 
+        predator_status = "enabled" if predator else "disabled"
         logger.info(
-            "BeastPaperTrader initialized: notional=$%.2f, telegram=%s",
-            notional_usd, telegram_enabled
+            "BeastPaperTrader initialized: notional=$%.2f, telegram=%s, predator=%s",
+            notional_usd, telegram_enabled, predator_status
         )
 
     def _handle_shutdown(self, signum, frame):
@@ -309,12 +331,119 @@ class BeastPaperTrader:
                 new_mode = BeastMode.NEUTRAL
                 reason = f"Mixed signals (RSI={rsi:.0f}, FNG={fng})"
 
+        # Apply Predator adjustment (if available)
+        predator_score = self._get_predator_signal()
+        if predator_score:
+            adjusted_mode = self._apply_predator_adjustment(new_mode, predator_score)
+            if adjusted_mode != new_mode:
+                reason += f" | Predator: {predator_score.signal} ({predator_score.conviction:.0f})"
+                new_mode = adjusted_mode
+                logger.info(
+                    "Predator adjusted mode: %s -> %s",
+                    current_mode.value, new_mode.value
+                )
+
         # Apply mode change
         if new_mode != current_mode:
             if self.tracker.change_mode(new_mode, price, reason, indicators):
                 logger.info("Mode changed: %s -> %s", current_mode.value, new_mode.value)
                 if self.telegram:
                     self._send_mode_change_notification(new_mode, price, reason)
+
+    def _get_predator_signal(self) -> Optional["ConvictionScore"]:
+        """
+        Get Predator signal with caching and fallback.
+
+        Returns cached signal if fresh, otherwise fetches new one.
+        Returns None if Predator not available or fails.
+        """
+        if self._predator is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+
+        # Return cache if fresh
+        if self._predator_cache and self._predator_cache_time:
+            age = (now - self._predator_cache_time).total_seconds()
+            if age < self.PREDATOR_CACHE_TTL_MINUTES * 60:
+                return self._predator_cache
+
+        # Refresh cache
+        try:
+            score = self._predator.analyze()
+            self._predator_cache = score
+            self._predator_cache_time = now
+            logger.info(
+                "Predator signal: %s (conviction: %.0f, action: %s)",
+                score.signal, score.conviction, score.action
+            )
+            return score
+        except Exception as e:
+            logger.warning("Predator analysis failed: %s", e)
+            # Return stale cache if available
+            if self._predator_cache is not None:
+                logger.info("Using stale Predator cache")
+                return self._predator_cache
+            return None
+
+    def _apply_predator_adjustment(
+        self,
+        base_mode: BeastMode,
+        predator: "ConvictionScore",
+    ) -> BeastMode:
+        """
+        Adjust Beast's base mode using Predator's crowd signal.
+
+        Philosophy:
+        - Agreement + high conviction -> upgrade mode
+        - Disagreement + high conviction -> downgrade to safety
+        - Low conviction -> no change
+        """
+        p_signal = predator.signal
+        p_conv = predator.conviction
+
+        # Map mode to direction
+        if base_mode in (BeastMode.FULL_LONG, BeastMode.HALF_LONG):
+            beast_dir = "LONG"
+        elif base_mode in (BeastMode.FULL_SHORT, BeastMode.HALF_SHORT):
+            beast_dir = "SHORT"
+        else:
+            beast_dir = "NEUTRAL"
+
+        # Agreement + high conviction = upgrade
+        if p_signal == beast_dir and p_conv >= self.PREDATOR_HIGH_CONVICTION:
+            if base_mode == BeastMode.HALF_LONG:
+                logger.info("Predator upgrade: HALF_LONG -> FULL_LONG")
+                return BeastMode.FULL_LONG
+            elif base_mode == BeastMode.HALF_SHORT:
+                logger.info("Predator upgrade: HALF_SHORT -> FULL_SHORT")
+                return BeastMode.FULL_SHORT
+
+        # Disagreement + moderate conviction = downgrade
+        if (p_signal != "NEUTRAL" and
+            p_signal != beast_dir and
+            p_conv >= self.PREDATOR_MODERATE_CONVICTION):
+            if base_mode in (BeastMode.FULL_LONG, BeastMode.FULL_SHORT):
+                # FULL -> HALF (reduce exposure on conflict)
+                new_mode = BeastMode.HALF_LONG if base_mode == BeastMode.FULL_LONG else BeastMode.HALF_SHORT
+                logger.info("Predator conflict: %s -> %s", base_mode.value, new_mode.value)
+                return new_mode
+            elif base_mode in (BeastMode.HALF_LONG, BeastMode.HALF_SHORT):
+                # HALF -> NEUTRAL (strong conflict)
+                logger.info("Predator conflict: %s -> NEUTRAL", base_mode.value)
+                return BeastMode.NEUTRAL
+
+        # Predator high conviction on NEUTRAL base = consider directional
+        if beast_dir == "NEUTRAL" and p_conv >= self.PREDATOR_HIGH_CONVICTION:
+            if p_signal == "LONG":
+                logger.info("Predator initiate: NEUTRAL -> HALF_LONG")
+                return BeastMode.HALF_LONG
+            elif p_signal == "SHORT":
+                logger.info("Predator initiate: NEUTRAL -> HALF_SHORT")
+                return BeastMode.HALF_SHORT
+
+        # No adjustment needed
+        return base_mode
 
     def _collect_funding(self, price: float) -> None:
         """Collect funding payment."""
@@ -521,6 +650,28 @@ _Hybrid Strategy: ARB + DIRECTIONAL_
                 "rsi": indicators.get("rsi", 50) if indicators else 50,
                 "fng": indicators.get("fng", 50) if indicators else 50,
             },
+            "predator": self._get_predator_status(),
+        }
+
+    def _get_predator_status(self) -> dict:
+        """Get Predator status for status dict."""
+        if self._predator is None:
+            return {"available": False, "reason": "not_configured"}
+
+        if self._predator_cache is None:
+            return {"available": False, "reason": "no_data"}
+
+        cache_age = None
+        if self._predator_cache_time:
+            cache_age = (datetime.now(timezone.utc) - self._predator_cache_time).total_seconds()
+
+        return {
+            "available": True,
+            "signal": self._predator_cache.signal,
+            "conviction": self._predator_cache.conviction,
+            "action": self._predator_cache.action,
+            "strength": self._predator_cache.strength,
+            "cache_age_seconds": cache_age,
         }
 
     def get_mode_dict(self) -> dict:

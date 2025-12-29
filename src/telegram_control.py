@@ -112,6 +112,11 @@ class TelegramControl:
         self._beast_mode_callback: Optional[Callable[[], dict]] = None
         self._beast_stop_callback: Optional[Callable[[], None]] = None
 
+        # Callbacks for predator bot commands
+        self._predator_status_callback: Optional[Callable[[], dict]] = None
+        self._predator_hunt_callback: Optional[Callable[[], str]] = None
+        self._predator_analyze_callback: Optional[Callable[[], dict]] = None
+
         if not HAS_TELEGRAM:
             logger.warning("Telegram library not available")
             return
@@ -160,6 +165,11 @@ class TelegramControl:
         self._app.add_handler(CommandHandler("beast", self._cmd_beast_status))
         self._app.add_handler(CommandHandler("mode", self._cmd_mode))
         self._app.add_handler(CommandHandler("trinity", self._cmd_trinity))
+
+        # Predator bot commands
+        self._app.add_handler(CommandHandler("predator", self._cmd_predator))
+        self._app.add_handler(CommandHandler("hunt", self._cmd_hunt))
+        self._app.add_handler(CommandHandler("conviction", self._cmd_conviction))
 
     def set_callbacks(
         self,
@@ -220,6 +230,17 @@ class TelegramControl:
         self._beast_status_callback = status
         self._beast_mode_callback = mode
         self._beast_stop_callback = stop
+
+    def set_predator_callbacks(
+        self,
+        status: Optional[Callable[[], dict]] = None,
+        hunt: Optional[Callable[[], str]] = None,
+        analyze: Optional[Callable[[], dict]] = None,
+    ) -> None:
+        """Set callbacks for predator bot commands."""
+        self._predator_status_callback = status
+        self._predator_hunt_callback = hunt
+        self._predator_analyze_callback = analyze
 
     def _is_authorized(self, user_id: int) -> bool:
         """Check if user is authorized."""
@@ -291,20 +312,63 @@ _Trading bot is running in {mode} mode._
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /balance command."""
+        """Handle /balance command - shows combined portfolio summary."""
         if not self._is_authorized(update.effective_user.id):
             return
 
-        if self._balance_callback:
-            try:
-                balance = self._balance_callback()
-                msg = self._format_balance(balance)
-            except Exception as e:
-                msg = f"Error getting balance: {e}"
-        else:
-            msg = "Balance not available"
+        try:
+            import requests
+            # Get current BTC price
+            btc_price = float(requests.get(
+                "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+                timeout=5
+            ).json()["price"])
 
-        await update.message.reply_text(msg, parse_mode="Markdown")
+            # Get ARB status
+            arb = self._arb_status_callback() if self._arb_status_callback else {}
+            arb_funding = arb.get("funding_collected", 0)
+            arb_starting = arb.get("notional", 10000)
+
+            # Get Beast status
+            beast = self._beast_status_callback() if self._beast_status_callback else {}
+            beast_funding = beast.get("funding_collected", 0)
+            beast_dir_pnl = beast.get("directional_pnl", 0)
+            beast_starting = beast.get("notional", 10000)
+
+            # Calculate totals
+            arb_balance = arb_starting + arb_funding
+            beast_balance = beast_starting + beast_funding + beast_dir_pnl
+            total_starting = arb_starting + beast_starting
+            total_balance = arb_balance + beast_balance
+            total_profit = total_balance - total_starting
+            pct = (total_profit / total_starting * 100) if total_starting > 0 else 0
+
+            msg = f"""💰 *PORTFOLIO BALANCE*
+━━━━━━━━━━━━━━━━━━━━━━━━
+BTC: `${btc_price:,.2f}`
+
+*ARB BOT:*
+  Start:   `$10,000`
+  Funding: `+${arb_funding:.2f}`
+  Balance: `${arb_balance:,.2f}`
+
+*BEAST BOT:*
+  Start:   `$10,000`
+  Funding: `+${beast_funding:.2f}`
+  Dir PnL: `${beast_dir_pnl:+.2f}`
+  Balance: `${beast_balance:,.2f}`
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+*TOTAL:*
+  Start:   `${total_starting:,.0f}`
+  Current: `${total_balance:,.2f}`
+  Profit:  `${total_profit:+.2f}` (`{pct:+.3f}%`)
+
+⚠️ _Paper trading - not real_"""
+
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /pause command."""
@@ -930,6 +994,146 @@ BTC: `${btc_price:,.2f}`
             lines.append(f"*Best:* {best[0]} (`${best[1]:+,.2f}`)")
 
         return "\n".join(lines)
+
+    # ==========================================
+    # Predator Bot Commands
+    # ==========================================
+
+    async def _cmd_predator(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /predator command - full analysis."""
+        if not self._is_authorized(update.effective_user.id):
+            return
+
+        if not self._predator_status_callback:
+            await update.message.reply_text(
+                "🦅 *THE PREDATOR*\n\n"
+                "Predator bot not running.\n"
+                "Use `run_predator.py` to start."
+            , parse_mode="Markdown")
+            return
+
+        try:
+            # Trigger a fresh analysis
+            if self._predator_analyze_callback:
+                self._predator_analyze_callback()
+
+            status = self._predator_status_callback()
+            msg = self._format_predator_status(status)
+        except Exception as e:
+            msg = f"Error getting predator status: {e}"
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_hunt(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /hunt command - active signals only."""
+        if not self._is_authorized(update.effective_user.id):
+            return
+
+        if not self._predator_hunt_callback:
+            await update.message.reply_text(
+                "🦅 *NO ACTIVE HUNT*\n\n"
+                "Predator bot not running."
+            , parse_mode="Markdown")
+            return
+
+        try:
+            # Trigger fresh analysis first
+            if self._predator_analyze_callback:
+                self._predator_analyze_callback()
+
+            msg = self._predator_hunt_callback()
+        except Exception as e:
+            msg = f"Error: {e}"
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_conviction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /conviction command - quick score check."""
+        if not self._is_authorized(update.effective_user.id):
+            return
+
+        if not self._predator_status_callback:
+            await update.message.reply_text("Predator not running")
+            return
+
+        try:
+            # Trigger fresh analysis
+            if self._predator_analyze_callback:
+                self._predator_analyze_callback()
+
+            status = self._predator_status_callback()
+            msg = self._format_conviction_quick(status)
+        except Exception as e:
+            msg = f"Error: {e}"
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    def _format_predator_status(self, status: dict) -> str:
+        """Format full predator analysis."""
+        if status.get("status") == "No analysis yet":
+            return "🦅 *THE PREDATOR*\n\nNo analysis yet. Waiting for first scan..."
+
+        signal = status.get("signal", "NEUTRAL")
+        conviction = status.get("conviction", 0)
+        strength = status.get("strength", "none")
+        action = status.get("action", "NO_TRADE")
+
+        emoji = {"LONG": "🟢", "SHORT": "🔴", "NEUTRAL": "⚪"}.get(signal, "❓")
+        action_emoji = {"TRADE": "🎯", "CONSIDER": "🤔", "WAIT": "⏳", "NO_TRADE": "🚫"}.get(action, "❓")
+
+        # Bar visualization
+        def bar(value: float, max_val: float) -> str:
+            filled = int((value / max_val) * 10) if max_val > 0 else 0
+            return "█" * filled + "░" * (10 - filled)
+
+        funding_score = status.get("funding_score", 0)
+        oi_score = status.get("oi_score", 0)
+        ls_score = status.get("ls_ratio_score", 0)
+        taker_score = status.get("taker_score", 0)
+
+        return f"""
+🦅 *THE PREDATOR - FULL ANALYSIS*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{emoji} *{signal}* | {action_emoji} *{action}*
+
+*CONVICTION: `{conviction:.0f}/100`* ({strength})
+
+*Component Scores:*
+Funding  [{bar(funding_score, 30)}] `{funding_score:.1f}/30`
+OI       [{bar(oi_score, 25)}] `{oi_score:.1f}/25`
+L/S Ratio[{bar(ls_score, 25)}] `{ls_score:.1f}/25`
+Taker    [{bar(taker_score, 20)}] `{taker_score:.1f}/20`
+
+*Signal Agreement:*
+🟢 LONG: {status.get('signals_long', 0)} | 🔴 SHORT: {status.get('signals_short', 0)} | ⚪ NEUTRAL: {status.get('signals_neutral', 0)}
+Agreement: `{status.get('agreement_pct', 0):.0f}%`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 *{status.get('summary', 'No summary')}*
+
+Analyses: `{status.get('analysis_count', 0)}`
+        """.strip()
+
+    def _format_conviction_quick(self, status: dict) -> str:
+        """Format quick conviction check."""
+        if status.get("status") == "No analysis yet":
+            return "🦅 No data yet"
+
+        signal = status.get("signal", "NEUTRAL")
+        conviction = status.get("conviction", 0)
+        action = status.get("action", "NO_TRADE")
+
+        emoji = {"LONG": "🟢", "SHORT": "🔴", "NEUTRAL": "⚪"}.get(signal, "❓")
+
+        return f"""
+🦅 *CONVICTION CHECK*
+
+{emoji} *{signal}* | Score: `{conviction:.0f}/100`
+Action: *{action}*
+
+Signals: {status.get('signals_long', 0)}L / {status.get('signals_short', 0)}S / {status.get('signals_neutral', 0)}N
+        """.strip()
 
     def _format_arb_status(self, status: dict) -> str:
         """Format arb paper trading status for display."""

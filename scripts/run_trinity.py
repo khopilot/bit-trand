@@ -49,6 +49,7 @@ from src.paper_trading import FundingArbPaperTrader
 from src.paper_trading.directional_simulator import DirectionalPaperTrader
 from src.paper_trading.beast_simulator import BeastPaperTrader
 from src.telegram_control import TelegramControl
+from src.predator import PredatorBot
 
 # Configure logging
 logging.basicConfig(
@@ -105,6 +106,13 @@ async def main_async(
     if telegram_enabled and not (bot_token and chat_id):
         logger.warning("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
 
+    # Initialize Predator (crowd analysis)
+    predator = PredatorBot(
+        symbol="BTCUSDT",
+        state_file=PROJECT_ROOT / "logs" / "predator_state.json",
+    )
+    logger.info("Predator initialized for crowd analysis")
+
     # Initialize ALL THREE traders
     arb_trader = FundingArbPaperTrader(
         notional_usd=notional_usd,
@@ -119,6 +127,7 @@ async def main_async(
     beast_trader = BeastPaperTrader(
         notional_usd=notional_usd,
         telegram_enabled=False,  # Use shared Telegram control
+        predator=predator,  # Inject Predator for smart mode switching
     )
 
     # Centralized signal handling - stops ALL bots together
@@ -166,6 +175,13 @@ async def main_async(
             stop=beast_trader.stop,
         )
 
+        # Set predator callbacks (for /predator, /hunt, /conviction commands)
+        telegram.set_predator_callbacks(
+            status=predator.get_status_dict,
+            hunt=predator.get_hunt_report,
+            analyze=predator.analyze,
+        )
+
         # Also set main status callback
         telegram.set_callbacks(
             status=arb_trader.get_status_dict,
@@ -173,23 +189,26 @@ async def main_async(
 
     print("""
 ================================================================================
-                    THE TRINITY - THREE BOTS IN PARALLEL
+                    THE TRINITY + PREDATOR
 ================================================================================
 
-Running THREE paper trading bots:
+Running THREE paper trading bots + PREDATOR crowd analysis:
 
   BOT A (ARB):         Long Spot + Short Perp = Funding collection
   BOT B (DIRECTIONAL): EMA + RSI + BB signals = Trend trading
-  BOT C (THE BEAST):   ARB + DIRECTIONAL hybrid = Dynamic hedge
+  BOT C (THE BEAST):   ARB + DIRECTIONAL hybrid + PREDATOR brain
+
+  PREDATOR:            Crowd analysis -> guides Beast's mode switching
 
 Telegram Commands:
-  /trinity   - Compare ALL 3 strategies (recommended!)
-  /arb       - Arb bot status
-  /dir       - Directional bot status
-  /beast     - Beast hybrid status
-  /mode      - Beast mode details
-  /signals   - Current indicators
-  /trades    - Recent directional trades
+  /trinity    - Compare ALL 3 strategies
+  /arb        - Arb bot status
+  /dir        - Directional bot status
+  /beast      - Beast hybrid status (now with Predator!)
+  /mode       - Beast mode details
+  /predator   - Full Predator analysis
+  /hunt       - Active Predator signals
+  /conviction - Quick conviction score
 
 Press Ctrl+C to stop all bots.
 ================================================================================
